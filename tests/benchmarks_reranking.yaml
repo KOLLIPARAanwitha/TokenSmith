@@ -1,0 +1,367 @@
+evaluation_plan:
+  research_question: "Does coverage-aware, constraint-based reranking improve multi-hop QA evidence coverage and answer quality?"
+  baselines:
+    - id: baseline_no_rerank
+      description: "No reranking; retrieval output order is used directly."
+      rerank_mode: "none"
+    - id: baseline_cross_encoder
+      description: "Standard cross-encoder reranking using ms-marco-MiniLM-L6-v2."
+      rerank_mode: "cross_encoder"
+    - id: candidate_coverage_constraints
+      description: "Coverage-aware + constrained reranking."
+      rerank_mode: "adaptive_multi_hop"
+
+  answer_quality_rubric:
+    scale: "0-2"
+    dimensions:
+      faithfulness:
+        2: "All key claims are supported by retrieved chunks; no unsupported claims."
+        1: "Mostly supported, but has minor unsupported/generalized claims."
+        0: "Contains unsupported or hallucinated key claims."
+      completeness:
+        2: "Covers all required parts (all subqueries / required points)."
+        1: "Partially covers required parts."
+        0: "Misses most required parts."
+      correctness:
+        2: "Factually correct against textbook evidence."
+        1: "Minor factual imprecision that does not change core conclusion."
+        0: "One major or multiple factual errors."
+    aggregate:
+      formula: "quality_score_0_to_2 = 0.35*faithfulness + 0.30*completeness + 0.35*correctness"
+
+  retrieval_metrics:
+    - "subquery_coverage_at_k"
+    - "relevant_chunk_recall_at_k"
+    - "precision_at_k"
+    - "page_diversity_at_k"
+    - "latency_ms_total"
+    - "latency_ms_rerank"
+
+benchmarks:
+  # ------------------------------
+  # Multi-hop (seed + expansion)
+  # ------------------------------
+  - id: "mh_isolation_locking_recovery"
+    type: "multi_hop"
+    question: "How do isolation levels interact with lock-based protocols and recovery behavior under cascading rollback?"
+    subqueries:
+      - "Isolation levels and anomalies prevented."
+      - "Lock-based protocol behavior (e.g., 2PL variants)."
+      - "Cascading rollback / recoverability interaction."
+    must_include_points: []
+    expected_answer: "SQL defines four isolation levels — read uncommitted, read committed, repeatable read, and serializable — each permitting progressively fewer anomalies (dirty reads, nonrepeatable reads, phantom reads). These levels interact directly with lock-based concurrency control.
+ 
+      Basic two-phase locking (2PL) ensures conflict serializability by splitting a transaction's lock activity into a growing phase (only acquisitions) and a shrinking phase (only releases). However, 2PL alone does not prevent cascading rollback: a transaction may release a lock and allow another transaction to read its written but not-yet-committed value. If the writer then aborts, all transactions that read its writes must also be rolled back — a cascading rollback.
+ 
+      Strict 2PL addresses this by retaining all exclusive (write) locks until the transaction commits or aborts. This prevents any other transaction from reading uncommitted dirty data, making the schedule cascadeless. Rigorous 2PL goes further, holding both shared and exclusive locks until commit, which additionally ensures transactions serialize in commit order.
+ 
+      Recovery algorithms (such as the one underlying ARIES) typically require strict 2PL: because undo of a transaction must not affect data already seen by committed transactions, exclusive locks must be held until commit. This means that the isolation level and the locking variant co-determine recoverability guarantees — serializable isolation implemented via strict 2PL is both conflict-serializable and cascadeless, while weaker levels (e.g., read committed implemented by releasing read locks early) can permit anomalies and complicate recovery."
+    keywords: ["isolation", "2PL", "cascading rollback", "recoverable", "serializable"]
+    similarity_threshold: 0.75
+    ideal_retrieved_chunks: [1073, 1074, 1094, 1072, 1199]
+
+  - id: "mh_2pl_to_snapshot_anomalies_recoverability"
+    type: "multi_hop"
+    question: "Compare strict 2PL, timestamp ordering, and snapshot isolation: which anomalies each prevents, and how that affects recoverability?"
+    subqueries:
+      - "Strict 2PL anomaly/recoverability properties."
+      - "Timestamp ordering anomaly/recoverability properties."
+      - "Snapshot isolation anomaly/recoverability properties."
+    must_include_points: []
+    expected_answer: "**Strict 2PL** guarantees conflict serializability by holding all exclusive locks until commit (and shared locks until end of growing phase in the strict variant). It prevents dirty reads, nonrepeatable reads, and — with predicate/gap locking — phantom reads. Because exclusive locks are held until commit, no transaction can read an uncommitted write, making schedules cascadeless and easily recoverable.
+ 
+      **Timestamp ordering (TO)** assigns each transaction a unique timestamp at start and enforces that conflicting read/write operations occur in timestamp order; a transaction that violates ordering is rolled back and restarted with a new timestamp. This prevents dirty reads in practice (rolled-back transactions do not commit their writes), but unless additional mechanisms such as Thomas' write rule are applied, cascading rollback is possible if a transaction reads a value written by another that later aborts. TO ensures conflict serializability (via timestamp order) but can suffer high abort rates under contention.
+ 
+      **Snapshot isolation (SI)** gives each transaction a consistent snapshot of committed data as of its start time. Reads never block and never see dirty (uncommitted) data, preventing dirty reads and nonrepeatable reads. However, SI permits write skew — two concurrent transactions each read a set of rows and update disjoint subsets in a way that no serial execution would allow — so SI is not fully serializable. Recoverability is preserved (only committed values are visible), but serializability requires serializable snapshot isolation (SSI) extensions.
+ 
+      In summary: strict 2PL is fully serializable and cascadeless; timestamp ordering is serializable but may incur rollbacks and requires care for cascadelessness; snapshot isolation is recoverable and avoids many anomalies but is not serializable without SSI."
+    keywords: ["strict 2PL", "timestamp ordering", "snapshot isolation", "anomalies", "recoverability"]
+    similarity_threshold: 0.78
+    ideal_retrieved_chunks: [1094, 1127, 1143, 1148, 1073, 1199]
+
+  - id: "mh_workload_index_opt_buffer_tradeoff"
+    type: "multi_hop"
+    question: "If a workload has heavy joins and frequent updates, how should index design, query optimization plan choice, and buffer management be balanced?"
+    subqueries:
+      - "Index design for join-heavy update-heavy workloads."
+      - "Query plan tradeoffs under workload characteristics."
+      - "Buffer management impact."
+    must_include_points: []
+    expected_answer: "For a workload with heavy joins and frequent updates, the three components — indexing, query optimization, and buffer management — must be balanced carefully because choices in one area directly affect the others.
+ 
+      **Index design**: B+-tree indices significantly accelerate indexed nested-loop joins and selective probes, but every update, insert, or delete requires index maintenance. In an update-heavy workload, maintaining many indices adds substantial write overhead. The recommendation is to index only the join attributes and highly selective predicates that benefit the most queries, and to avoid over-indexing. Clustered indices can reduce I/O for join probes, but only one clustering per relation is possible, and frequent updates can cause costly page splits.
+ 
+      **Query plan selection**: The query optimizer evaluates join algorithms based on available buffer, relation sizes, and index availability. Hash join is typically best for large unsorted equijoins when sufficient buffer is available. Sort-merge join suits data that is already sorted or nearly so. Indexed nested-loop join is optimal when the inner relation has a selective index and the outer relation is small. With frequent updates, selectivity estimates may become stale, so statistics should be refreshed regularly.
+ 
+      **Buffer management**: The buffer pool directly influences join performance. Block nested-loop join improves dramatically with more buffer pages (reducing passes). Hash join requires enough buffer to hold at least one partition in memory to avoid recursive partitioning. The database buffer manager uses strategies like LRU, but may apply MRU for sequential scans (to avoid polluting the buffer pool). Pinning pages during a join avoids repeated eviction and re-reading of inner relation blocks.
+ 
+      In practice: prefer a small, well-chosen set of B+-tree indices on join keys; use the cost-based optimizer with up-to-date statistics to select the join algorithm; and allocate sufficient buffer to whichever join algorithm dominates the workload."
+    keywords: ["joins", "updates", "index", "query optimization", "buffer management"]
+    similarity_threshold: 0.75
+    ideal_retrieved_chunks: [908, 909, 940, 937, 938, 918, 920, 926, 1000, 787, 780]
+
+  - id: "mh_distributed_partition_replication_protocols"
+    type: "multi_hop"
+    question: "In distributed databases, how do partitioning and replication influence distributed commit/concurrency protocols and distributed query optimization?"
+    subqueries:
+      - "Partitioning effects."
+      - "Replication effects."
+      - "Impact on commit/concurrency protocol."
+      - "Impact on distributed optimization."
+    must_include_points: []
+    expected_answer: "**Partitioning** splits a relation's tuples across nodes using strategies such as range, hash, or round-robin partitioning. This enables parallel query execution and data locality but means that queries spanning multiple partitions require distributed joins, aggregation, and — for updates — distributed transactions.
+ 
+      **Replication** stores copies of data on multiple nodes, improving read throughput and fault tolerance. However, updates must be applied to all replicas consistently, introducing write synchronization costs. Approaches include primary-copy (all writes go to one master, propagated to secondaries) and quorum-based protocols.
+ 
+      **Impact on distributed commit protocols**: Because a distributed transaction may access data on several nodes, atomicity requires a distributed commit protocol. Two-phase commit (2PC) is standard: the coordinator sends a `prepare` message to all participants, collects `ready` or `abort` votes, then commits or aborts globally. With replication, each replica of an updated relation must participate in (or be notified by) the commit protocol. Coordinator failure in 2PC can leave participants in a blocking state; consensus-based 2PC (e.g., using Paxos or Raft) eliminates this by replicating the coordinator's decision.
+ 
+      **Impact on concurrency control**: Distributed concurrency control typically uses a distributed lock manager (one per node, cooperating) or timestamp ordering. With replication, a write must be globally ordered across replicas; primary-copy locking concentrates this at the master. Distributed snapshot isolation requires tracking commit timestamps across nodes.
+ 
+      **Impact on query optimization**: The optimizer must consider data placement when building plans. Semijoins reduce inter-node data transfer: instead of shipping a full relation, a projection of join attributes is sent first, filtered at the remote site, and only matching tuples returned. Partition pruning eliminates nodes from execution when selection predicates match partition predicates, directly reducing both I/O and network cost."
+    keywords: ["partitioning", "replication", "distributed commit", "concurrency", "optimization"]
+    similarity_threshold: 0.75
+    ideal_retrieved_chunks: [1319, 1321, 1334, 1456, 1457, 1460, 1473, 1432, 1446]
+
+  - id: "mh_strict2pl_vs_to_serial_deadlock_recovery"
+    type: "multi_hop"
+    question: "Compare strict 2PL and timestamp ordering on conflict serializability, deadlocks, and recoverability."
+    subqueries:
+      - "Conflict serializability comparison."
+      - "Deadlock behavior comparison."
+      - "Recoverability comparison."
+    must_include_points: []
+    expected_answer: "**Conflict serializability**: Both protocols guarantee conflict-serializable schedules. Strict 2PL orders transactions by their lock points (the moment a transaction acquires its last lock); this ordering is a valid serialization order. Timestamp ordering enforces serializability by ensuring that all conflicting operations between any two transactions occur in timestamp order; a transaction that would violate this order is rolled back and restarted with a new timestamp.
+ 
+      **Deadlocks**: Strict 2PL is susceptible to deadlocks. Because transactions block waiting for locks held by other transactions, circular wait chains can form. Systems using strict 2PL must implement deadlock detection (via a wait-for graph, checking for cycles) or deadlock prevention (wound-wait, wait-die schemes). Timestamp ordering is inherently deadlock-free: rather than blocking, a transaction that cannot proceed (because it would violate timestamp order) is immediately aborted and restarted. There is no waiting, so no circular dependency can form.
+ 
+      **Recoverability**: Strict 2PL holds exclusive locks until commit, so no other transaction can read an uncommitted write. This makes strict 2PL cascadeless: if a transaction aborts, only it needs to be rolled back, not any dependents. Basic timestamp ordering does not inherently prevent a transaction from reading values written by another transaction that has not yet committed. If that writer later aborts, cascading rollback may result. Commit ordering or Thomas' write rule can be added to improve recoverability, but this requires care.
+ 
+      In summary: strict 2PL is deadlock-prone but naturally cascadeless; timestamp ordering is deadlock-free but may require additional mechanisms to ensure cascadelessness."
+    keywords: ["strict 2PL", "timestamp ordering", "serializability", "deadlock", "recoverability"]
+    similarity_threshold: 0.80
+    ideal_retrieved_chunks: [1094, 1127, 1103, 1073, 1199]
+
+  - id: "mh_strict_vs_rigorous_2pl"
+    type: "multi_hop"
+    question: "Compare strict 2PL and rigorous 2PL in terms of lock release timing, recoverability guarantees, and concurrency."
+    subqueries:
+      - "Lock release timing."
+      - "Recoverability/cascadeless behavior."
+      - "Concurrency tradeoff."
+    must_include_points: []
+    expected_answer: "**Lock release timing**: In strict 2PL, a transaction holds all exclusive (write) locks until it commits or aborts, but it may release shared (read) locks during the shrinking phase before commit. In rigorous 2PL, a transaction holds all locks — both shared and exclusive — until it commits. Rigorous 2PL is thus a stricter variant.
+ 
+      **Recoverability**: Both protocols guarantee cascadeless schedules because exclusive locks are held past commit, making it impossible for another transaction to read uncommitted data written by the lock holder. If a transaction aborts, only its own changes need to be undone; no cascading rollback occurs. Rigorous 2PL provides an additional property: because all locks are held until commit, the commit order directly defines a valid serialization order. This simplifies recovery reasoning and is particularly useful when integration with replication or logging requires a clear commit sequence.
+ 
+      **Concurrency**: Strict 2PL provides somewhat higher concurrency than rigorous 2PL. By releasing shared locks before commit (while still in the shrinking phase under basic 2PL), other transactions can acquire read access to those data items sooner. Rigorous 2PL withholds even shared locks until commit, which can delay transactions that need to read data held by a long-running transaction, reducing throughput. In practice, rigorous 2PL is often preferred for its simplicity and stronger guarantees despite the concurrency cost."
+    keywords: ["strict 2PL", "rigorous 2PL", "locks", "recoverability", "concurrency"]
+    similarity_threshold: 0.76
+    ideal_retrieved_chunks: [1094, 1073, 1199]
+
+  - id: "mh_deadlock_prevention_vs_detection_tradeoff"
+    type: "multi_hop"
+    question: "How do deadlock prevention and deadlock detection/recovery differ in overhead, rollback behavior, and throughput tradeoffs?"
+    subqueries:
+      - "Overhead comparison."
+      - "Rollback implications."
+      - "Throughput implications."
+    must_include_points: []
+    expected_answer: "**Overhead**: Deadlock prevention imposes overhead on every lock request — each request must be checked against a global ordering or an age-based preemption rule (wound-wait or wait-die). This overhead is constant and per-operation. Deadlock detection adds overhead periodically when the system invokes the cycle-detection algorithm on the wait-for graph, plus the maintenance cost of updating the graph as transactions acquire and release locks. Under workloads with rare deadlocks, detection adds less overhead than prevention.
+ 
+      **Rollback behavior**: Prevention schemes roll back transactions preemptively: in wait-die, a younger transaction that requests a lock held by an older one is aborted immediately (it 'dies'), even if the actual wait would not have led to a deadlock. In wound-wait, the older transaction preempts the younger one. These are conservative rollbacks. Detection-based recovery rolls back transactions only after a deadlock cycle is confirmed, choosing a victim based on cost (age, data items held, work done). This is reactive and potentially more targeted, but the victim may have done significant work.
+ 
+      **Throughput tradeoffs**: Prevention can hurt throughput by aborting transactions unnecessarily, especially under high contention. However, it avoids the latency spike caused by a deadlock being detected (which may take seconds or more). Detection allows optimistic execution and only penalizes transactions when deadlocks actually occur, which can yield better throughput in workloads with infrequent deadlocks. However, under high-contention workloads, frequent deadlocks make detection costly. Both must guard against starvation: a repeatedly rolled-back transaction must eventually be allowed to proceed, typically by giving it priority after a rollback."
+    keywords: ["deadlock prevention", "deadlock detection", "rollback", "overhead", "throughput"]
+    similarity_threshold: 0.74
+    ideal_retrieved_chunks: [1103, 1104, 1107, 1108, 1110]
+
+  - id: "mh_wal_aries_checkpoint"
+    type: "multi_hop"
+    question: "How do write-ahead logging and ARIES interact with checkpoints during crash recovery?"
+    subqueries:
+      - "WAL requirement/order."
+      - "ARIES analysis/redo/undo roles."
+      - "Checkpoint role."
+    must_include_points: []
+    expected_answer: "**Write-ahead logging (WAL)** is the foundational requirement: before any data page modified by a transaction can be written to disk, the corresponding log record must be forced to stable storage. This ordering guarantee means that even if the system crashes immediately after writing a page, the log already contains the record needed to redo or undo that change. WAL also requires that all log records for a transaction be written to stable storage before the transaction commits (the commit log record must be durable before acknowledging commit).
+ 
+      **ARIES** is the state-of-the-art recovery algorithm built on WAL. It uses log sequence numbers (LSNs) — monotonically increasing identifiers assigned to each log record — and stores the LSN of the most recent log record applied to each page (pageLSN) in the page itself. This allows ARIES to determine, for each page, exactly what has already been applied.
+ 
+      ARIES recovery proceeds in three phases:
+      1. **Analysis**: Scan the log forward from the last checkpoint to reconstruct the dirty page table (which pages were modified but not yet flushed at crash) and the transaction table (which transactions were active at crash).
+      2. **Redo**: Scan forward from the log record corresponding to the earliest dirty page, replaying all logged operations. An operation is skipped if the page's pageLSN already reflects that update, avoiding redundant work.
+      3. **Undo**: Scan backward through the log to undo all operations of transactions that were active at crash time, writing compensation log records (CLRs) so that the undo itself is logged and idempotent.
+ 
+      **Checkpoints** reduce recovery time by bounding how far back in the log recovery must scan. ARIES supports fuzzy checkpoints: rather than flushing all dirty pages (which would be expensive), it records the current transaction table and dirty page table in the log at checkpoint time, then continues normal operation. This means recovery can start from the checkpoint LSN rather than the log's beginning, while the redo phase handles any dirty pages that were not flushed before the crash."
+    keywords: ["WAL", "ARIES", "checkpoint", "redo", "undo", "recovery"]
+    similarity_threshold: 0.76
+    ideal_retrieved_chunks: [1242, 1205, 1208, 1209, 1210, 1216, 1218]
+
+  - id: "mh_clustered_index_join_io"
+    type: "multi_hop"
+    question: "How does clustered indexing interact with join algorithm choice and disk I/O cost?"
+    subqueries:
+      - "Clustered index access pattern."
+      - "Join algorithm dependence."
+      - "I/O cost impact."
+    must_include_points: []
+    expected_answer: "A **clustered index** physically orders the data pages of a relation according to the index key. A scan or range lookup on the clustered attribute retrieves logically adjacent tuples in a small number of sequential I/Os. An unclustered index, by contrast, may require a separate random disk access per tuple, making large retrievals expensive.
+ 
+      **Indexed nested-loop join**: For each tuple in the outer relation, the system probes the inner relation using the join attribute's index. If the inner relation has a clustering B+-tree on the join attribute, the matching tuples are physically contiguous; the cost of each probe is the B+-tree height plus a small number of block transfers. With a non-clustered index, each matching tuple may require a separate I/O, which can be very costly for large inner relations. For example, with a clustering index of height 4 and an average of one additional block access, the cost per outer tuple is 5 I/Os — far less than the potentially thousands of I/Os for an unclustered index over a large result.
+ 
+      **Sort-merge join**: This algorithm merges two sorted inputs. If a relation is clustered on the join attribute, it is already sorted, and the merge phase can be done with a single linear scan of each relation — minimizing I/O. If sorting is required, an external sort must be performed first, adding significant I/O cost proportional to the number of merge passes.
+ 
+      **Hash join**: Clustering provides less benefit for hash join, since the algorithm hashes tuples into partitions by join attribute value, scattering them regardless of physical order. Hash join's I/O cost is dominated by the partitioning phase (reading and writing each relation) and the probing phase. The main buffer management concern is having enough buffer frames to hold at least one complete partition in memory.
+ 
+      In general, clustered indices reduce I/O most dramatically for indexed nested-loop joins and sort-merge joins on pre-sorted data; hash join is less sensitive to physical ordering."
+    keywords: ["clustered index", "join", "I/O cost", "nested loop", "hash join", "sort-merge"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [908, 909, 940, 937, 938, 916, 918, 920, 926]
+
+  - id: "mh_2pc_vs_3pc_failures"
+    type: "multi_hop"
+    question: "Compare two-phase commit and three-phase commit under coordinator failure and network partition scenarios."
+    subqueries:
+      - "2PC behavior under failures."
+      - "3PC behavior under failures."
+      - "Blocking/availability tradeoff."
+    must_include_points: []
+    expected_answer: "**Two-phase commit (2PC)** works as follows: in phase 1, the coordinator sends a `prepare` message to all participants, who vote `ready` (flushing their log) or `abort`. In phase 2, if all participants voted ready, the coordinator logs `commit` and broadcasts it; otherwise it aborts. The critical problem arises when the coordinator fails after collecting ready votes but before broadcasting the decision: participants are in a \"ready\" state from which they cannot safely commit or abort unilaterally, because they do not know whether the coordinator committed. This leaves participants **blocked** until the coordinator recovers — a fundamental limitation of 2PC.
+ 
+      **Three-phase commit (3PC)** inserts a `pre-commit` phase between voting and commit. Once all votes are ready, the coordinator sends `pre-commit` to all participants before sending the final `commit`. If the coordinator then fails, a new coordinator knows (from the `pre-commit` messages in the log) that the decision was `commit`, and can safely proceed. This makes 3PC **non-blocking under single coordinator failure**.
+ 
+      However, 3PC is not resilient to **network partitions**. If a partition occurs after some participants receive `pre-commit` and others do not, different groups may reach different conclusions — one group commits and the other aborts — violating atomicity (split-brain). 2PC avoids this by being conservative (blocking rather than risking inconsistency).
+ 
+      **Practical modern approach**: Consensus-based 2PC replicates the coordinator's decision using a protocol like Paxos or Raft. Even if the coordinator node fails, other replicas have the decision in their log and can complete the commit without blocking. This achieves non-blocking behavior without 3PC's partition vulnerability and is used in systems like Google Spanner."
+    keywords: ["2PC", "3PC", "coordinator failure", "partition", "blocking"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [1456, 1457, 1460, 1463, 1551, 1569]
+
+  # ------------------------------
+  # Single-hop (seed + expansion)
+  # ------------------------------
+  - id: "sh_database_schema"
+    type: "single_hop"
+    question: "What is a database schema?"
+    must_include_points: ["Logical design/structure", "relations/attributes/constraints", "schema vs instance distinction"]
+    expected_answer: ""
+    keywords: ["schema", "logical design", "instance", "relation", "attribute"]
+    similarity_threshold: 0.70
+    ideal_retrieved_chunks: [49, 50, 51, 250, 60]
+
+  - id: "sh_primary_key"
+    type: "single_hop"
+    question: "What is a primary key?"
+    must_include_points: ["Uniqueness", "identifies tuple", "minimality/candidate key relation"]
+    expected_answer: ""
+    keywords: ["primary key", "uniqueness", "candidate key", "superkey"]
+    similarity_threshold: 0.70
+    ideal_retrieved_chunks: [55]
+
+  - id: "sh_sql_aggregate_functions"
+    type: "single_hop"
+    question: "What are SQL aggregate functions?"
+    must_include_points: ["Aggregation over sets/groups", "examples (SUM/AVG/MIN/MAX/COUNT)", "grouping context"]
+    expected_answer: "SQL aggregate functions take a collection of values — either a set or a multiset — as input and return a single scalar value. SQL defines five standard built-in aggregate functions: `avg` (average), `min` (minimum), `max` (maximum), `sum` (total), and `count` (number of values).
+ 
+      `sum` and `avg` require numeric input, while `min`, `max`, and `count` can operate on non-numeric data types such as strings. Aggregate functions are most commonly used in conjunction with `GROUP BY`: the query partitions tuples into groups based on one or more attributes, and the aggregate is computed independently within each group. The `HAVING` clause can then filter groups based on the aggregate result. `count(*)` counts all tuples including those with null attribute values, whereas `count(attribute)` ignores nulls for that attribute."
+    keywords: ["aggregate", "sum", "avg", "count", "group by"]
+    similarity_threshold: 0.70
+    ideal_retrieved_chunks: [109, 110, 112, 114, 116]
+
+  - id: "sh_two_phase_locking"
+    type: "single_hop"
+    question: "What is two-phase locking?"
+    must_include_points: ["Growing and shrinking phases", "serializability", "does not guarantee deadlock freedom"]
+    expected_answer: "Two-phase locking (2PL) is a concurrency control protocol that guarantees conflict serializability. It requires that each transaction's lock requests be divided into exactly two phases:
+ 
+      1. **Growing phase**: The transaction may acquire locks but may not release any lock.
+      2. **Shrinking phase**: The transaction may release locks but may not acquire any new lock.
+ 
+      The point at which a transaction acquires its final lock is called its lock point. Transactions can be totally ordered by lock point, and this order is a valid serialization order, which is why 2PL guarantees conflict serializability.
+ 
+      However, 2PL does not prevent deadlocks — two transactions each holding a lock the other needs can wait indefinitely. Deadlock detection or prevention must be added separately. Additionally, basic 2PL does not prevent cascading rollback: a transaction may release a lock and allow another to read its written but not-yet-committed data. The strict 2PL variant addresses this by holding all exclusive locks until commit."
+    keywords: ["2PL", "growing phase", "shrinking phase", "serializable", "deadlock"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [1094, 1079]
+
+  - id: "sh_deadlock_state"
+    type: "single_hop"
+    question: "What defines a system in deadlock state?"
+    must_include_points: ["Cycle of waiting transactions", "no progress possible"]
+    expected_answer: "A system is in a deadlock state when there exists a set of transactions such that every transaction in the set is waiting for a data item (lock) held by another transaction in the set. Formally, there exist transactions T₀, T₁, ..., Tₙ such that T₀ is waiting for a data item held by T₁, T₁ is waiting for one held by T₂, and so on, with Tₙ waiting for a data item held by T₀ — forming a cycle. No transaction in this set can ever make progress, since each is blocked by another in the cycle.
+ 
+      Deadlock is precisely described by a directed cycle in the wait-for graph, where an edge Tᵢ → Tⱼ indicates that Tᵢ is waiting for Tⱼ to release a data item. The only remedy is to roll back one or more transactions (victims) to release their locks and break the cycle, allowing the remaining transactions to proceed."
+    keywords: ["deadlock", "waiting", "cycle", "rollback"]
+    similarity_threshold: 0.70
+    ideal_retrieved_chunks: [1103, 1108, 1110]
+
+  - id: "sh_aries_recovery"
+    type: "single_hop"
+    question: "What is ARIES recovery?"
+    must_include_points: ["Write-ahead logging", "analysis/redo/undo", "crash recovery"]
+    expected_answer: "ARIES (Algorithm for Recovery and Isolation Exploiting Semantics) is the leading crash recovery algorithm for database systems, modeled on write-ahead logging. Its key innovation is the use of log sequence numbers (LSNs): each log record has a unique LSN, and each database page stores the LSN of the most recent log record applied to it (pageLSN).
+ 
+      ARIES recovery after a crash proceeds in three phases:
+      1. **Analysis**: Scan the log forward from the last checkpoint to reconstruct which pages were dirty (modified but not yet written to disk) and which transactions were active at the time of the crash.
+      2. **Redo**: Scan the log forward from the log record corresponding to the earliest dirty page, replaying all logged operations to bring the database to its state at the moment of the crash. A log record's update is skipped if the page's pageLSN already equals or exceeds the log record's LSN, avoiding redundant work.
+      3. **Undo**: Scan the log backward to roll back all transactions that were active at crash time. Each undo step writes a compensation log record (CLR), making the undo itself logged and idempotent (safe to redo if the system crashes again during recovery).
+ 
+      ARIES also supports fuzzy checkpoints that record the dirty page table and active transaction table in the log without flushing dirty pages to disk, significantly reducing checkpoint overhead compared to simpler schemes."
+    keywords: ["ARIES", "analysis", "redo", "undo", "WAL"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [1242, 1208, 1210, 1205]
+
+  - id: "sh_buffer_management"
+    type: "single_hop"
+    question: "What is buffer management?"
+    must_include_points: ["Memory pages caching", "replacement policy", "I/O minimization"]
+    expected_answer: ""
+    keywords: ["buffer", "page", "replacement", "I/O"]
+    similarity_threshold: 0.68
+    ideal_retrieved_chunks: [779, 780, 781, 787, 1215, 1218]
+
+  - id: "sh_bplus_tree_index"
+    type: "single_hop"
+    question: "What is a B+-tree index?"
+    must_include_points: ["Balanced tree", "high fan-out", "efficient disk I/O"]
+    expected_answer: ""
+    keywords: ["B+-tree", "fan-out", "balanced", "index", "disk I/O"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [908, 909, 940, 937, 938]
+
+  - id: "sh_query_optimization"
+    type: "single_hop"
+    question: "What is query optimization?"
+    must_include_points: ["Equivalent plans", "cost estimation", "choose lowest-cost plan"]
+    expected_answer: ""
+    keywords: ["query optimization", "cost", "plan", "optimizer"]
+    similarity_threshold: 0.70
+    ideal_retrieved_chunks: [1000, 980, 1029]
+
+  - id: "sh_data_partitioning_distributed"
+    type: "single_hop"
+    question: "What is data partitioning in distributed storage?"
+    must_include_points: ["Data split across nodes", "horizontal/vertical concepts", "scalability/performance rationale"]
+    expected_answer: ""
+    keywords: ["partitioning", "distributed", "scalability", "sharding"]
+    similarity_threshold: 0.68
+    ideal_retrieved_chunks: [1319, 1321, 775]
+
+  - id: "sh_conflict_serializability"
+    type: "single_hop"
+    question: "What is conflict serializability?"
+    must_include_points: ["Equivalent to serial via non-conflicting swaps", "precedence graph acyclicity condition"]
+    expected_answer: ""
+    keywords: ["conflict serializability", "serial schedule", "precedence graph", "acyclic"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [1064]
+
+  - id: "sh_cascadeless_schedule"
+    type: "single_hop"
+    question: "What is a cascadeless schedule?"
+    must_include_points: ["No reads of uncommitted writes", "prevents cascading rollback", "recoverable"]
+    expected_answer: ""
+    keywords: ["cascadeless", "recoverable", "commit", "read uncommitted", "rollback"]
+    similarity_threshold: 0.72
+    ideal_retrieved_chunks: [1073, 1072, 1094]

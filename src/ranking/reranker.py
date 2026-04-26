@@ -5,6 +5,7 @@ This module supports re-ranking strategies applied before the generative LLM cal
 """
 
 import re
+from collections import defaultdict
 from typing import Dict, List, Optional
 from sentence_transformers import CrossEncoder
 
@@ -89,8 +90,16 @@ def _merge_weak_fragments(parts: List[str]) -> List[str]:
             i += 1
             continue
 
-        # If the next part starts a new imperative clause, merge this weak bridge with the previous part
-        starts_with_imperative_cue = bool(re.match(r"^(explain|describe|discuss|analyze|evaluate|compare|contrast|summarize)\b", merged[i+1].strip().lower()))
+        # If the next part starts a new imperative clause, merge this weak bridge with the previous part.
+        # Guard i+1 before indexing to avoid out-of-range on trailing weak fragments.
+        starts_with_imperative_cue = False
+        if i + 1 < len(merged):
+            starts_with_imperative_cue = bool(
+                re.match(
+                    r"^(explain|describe|discuss|analyze|evaluate|compare|contrast|summarize)\b",
+                    merged[i + 1].strip().lower(),
+                )
+            )
         if i > 0 and i + 1 < len(merged) and starts_with_imperative_cue:
             merged[i - 1] = f"{merged[i - 1]} and {merged[i]}".strip()
             del merged[i]
@@ -403,6 +412,7 @@ def _constrained_post_select(
     ranked_indices: List[int],
     sub_scores: List[List[float]],
     top_n: int,
+    chunk_pages: Optional[List[List[int]]] = None,
 ) -> List[int]:
     """
     Enforcing constraint after chunk selection: per-subquery minimum coverage (>= tau_subquery)
@@ -415,50 +425,156 @@ def _constrained_post_select(
     m = len(sub_scores)
     tau_threshold = 0.52 if m >= 5 else 0.58
 
-    def run_pass(
+    def _apply_constraint_min_one_chunk_per_subquery(
+        selected: List[int],
+        selected_set: set[int],
         tau_subquery: float,
-    ) -> Optional[List[int]]:
-        selected: List[int] = []
-        selected_set = set()
-
-        def can_add(idx: int) -> bool:
-            return idx not in selected_set
-
-        # Stage 1: satisfy each subquery with at least one strong chunk.
+    ) -> bool:
+        """
+        each subquery should have at least one chunk with relevance score >= tau
+        """
         for sub_i in range(m):
             if len(selected) >= top_n:
                 break
             candidate = None
             for idx in ranked_indices:
-                if can_add(idx) and sub_scores[sub_i][idx] >= tau_subquery:
+                if idx in selected_set:
+                    continue
+                if sub_scores[sub_i][idx] >= tau_subquery:
                     candidate = idx
                     break
             if candidate is not None:
                 selected.append(candidate)
                 selected_set.add(candidate)
 
-        # verify every subquery covered
         for sub_i in range(m):
-            covered = any(sub_scores[sub_i][idx] >= tau_subquery for idx in selected)
-            if not covered:
+            if not any(sub_scores[sub_i][idx] >= tau_subquery for idx in selected):
+                return False
+        return True
+
+    def _apply_constraint_min_x_chunks_per_subquery(
+        selected: List[int],
+        selected_set: set[int],
+        tau_low: float,
+        min_chunks_per_subquery: int,
+    ) -> bool:
+        """
+        each subquery should have atleast X chunks with relevance score >= tau_low
+        """
+        if min_chunks_per_subquery <= 1:
+            return True
+
+        for sub_i in range(m):
+            while sum(1 for idx in selected if sub_scores[sub_i][idx] >= tau_low) < min_chunks_per_subquery:
+                if len(selected) >= top_n:
+                    return False
+                candidate = None
+                for idx in ranked_indices:
+                    if idx in selected_set:
+                        continue
+                    if sub_scores[sub_i][idx] >= tau_low:
+                        candidate = idx
+                        break
+                if candidate is None:
+                    return False
+                selected.append(candidate)
+                selected_set.add(candidate)
+        return True
+
+    def _apply_constraint_max_chunks_per_page(
+        selected: List[int],
+        max_chunks_per_page: int,
+    ) -> List[int]:
+        """
+        limit number of chunks from same textbook page
+        """
+        if not chunk_pages:
+            return selected[:top_n]
+        if max_chunks_per_page <= 0:
+            return selected[:top_n]
+
+        page_counts: Dict[int, int] = defaultdict(int)
+        filtered: List[int] = []
+
+        def _pages_for_chunk(local_idx: int) -> List[int]:
+            if local_idx < 0 or local_idx >= len(chunk_pages):
+                return [1]
+            pages = chunk_pages[local_idx] or [1]
+            return pages if isinstance(pages, list) else [int(pages)]
+
+        def _can_add_under_page_cap(local_idx: int) -> bool:
+            for page in _pages_for_chunk(local_idx):
+                if page_counts[page] >= max_chunks_per_page:
+                    return False
+            return True
+
+        def _add_chunk(local_idx: int):
+            filtered.append(local_idx)
+            for page in _pages_for_chunk(local_idx):
+                page_counts[page] += 1
+
+        for idx in selected:
+            if len(filtered) >= top_n:
+                break
+            if _can_add_under_page_cap(idx):
+                _add_chunk(idx)
+
+        selected_set = set(filtered)
+        for idx in ranked_indices:
+            if len(filtered) >= top_n:
+                break
+            if idx in selected_set:
+                continue
+            if _can_add_under_page_cap(idx):
+                _add_chunk(idx)
+                selected_set.add(idx)
+
+        return filtered
+
+    def run_pass(
+        tau_subquery: float,
+    ) -> Optional[List[int]]:
+        selected: List[int] = []
+        selected_set = set()
+        tau_multi_support = max(0.30, tau_subquery - 0.08)
+        min_chunks_per_subquery = 2
+        max_chunks_per_page = 2
+
+        constraint_pass = _apply_constraint_min_one_chunk_per_subquery(
+            selected=selected,
+            selected_set=selected_set,
+            tau_subquery=tau_subquery,
+        )
+        if not constraint_pass:
+            return None
+
+        constraint_pass = _apply_constraint_min_x_chunks_per_subquery(
+            selected=selected,
+            selected_set=selected_set,
+            tau_low=tau_multi_support,
+            min_chunks_per_subquery=min_chunks_per_subquery,
+        )
+        if not constraint_pass:
+            return None
+
+        while len(selected) < top_n:
+            for idx in ranked_indices:
+                if idx not in selected_set:
+                    selected.append(idx)
+                    selected_set.add(idx)
+                    break
+            else:
+                break
+
+        selected = _apply_constraint_max_chunks_per_page( selected=selected, max_chunks_per_page=max_chunks_per_page)
+
+        for sub_i in range(m):
+            if not any(sub_scores[sub_i][idx] >= tau_subquery for idx in selected):
+                return None
+            if sum(1 for idx in selected if sub_scores[sub_i][idx] >= tau_multi_support) < min_chunks_per_subquery:
                 return None
 
-        # if there is space for more chunks
-        while len(selected) < top_n:
-            candidate = None
-
-            for idx in ranked_indices:
-                if not can_add(idx):
-                    continue
-                candidate = idx
-                break
-
-            if candidate is None:
-                break
-
-            selected.append(candidate)
-            selected_set.add(candidate)
-
+        selected_set = set(selected)
         sorted_selected = [idx for idx in ranked_indices if idx in selected_set][:top_n]
         return sorted_selected
 
@@ -478,6 +594,7 @@ def rerank_indices(
     chunks: List[str],
     mode: str,
     top_n: int,
+    chunk_pages: Optional[List[List[int]]] = None,
 ) -> List[int]:
     """
     Ranking chunks
@@ -487,7 +604,12 @@ def rerank_indices(
     elif mode in {"multi_hop", "adaptive_multi_hop", "cross_encoder_multi_hop"}:
         if _is_multi_hop_query(query):
             ranked, final_scores, sub_scores = _rank_indices_with_subquery_coverage_details(query, chunks)
-            ranked = _constrained_post_select(ranked_indices=ranked, sub_scores=sub_scores,top_n=top_n if top_n and top_n > 0 else len(chunks))
+            ranked = _constrained_post_select(
+                ranked_indices=ranked,
+                sub_scores=sub_scores,
+                top_n=top_n if top_n and top_n > 0 else len(chunks),
+                chunk_pages=chunk_pages,
+            )
         else:
             ranked = _rank_indices_with_cross_encoder(query, chunks)
     else:

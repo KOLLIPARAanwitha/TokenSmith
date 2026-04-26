@@ -263,6 +263,10 @@ def get_answer(
             ranked_chunks,
             mode=cfg.rerank_mode,
             top_n=cfg.rerank_top_k,
+            chunk_pages=[
+                (page_nums.get(idx, [1]) if isinstance(page_nums.get(idx, [1]), list) else [page_nums.get(idx, 1)])
+                for idx in topk_idxs
+            ],
         )
         if local_reranked:
             topk_idxs = [topk_idxs[i] for i in local_reranked]

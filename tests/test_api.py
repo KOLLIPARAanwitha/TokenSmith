@@ -10,6 +10,8 @@ Or: pytest -m unit
 
 import pytest
 import numpy as np
+import sys
+import types
 
 # Mark all tests in this module as unit tests
 pytestmark = pytest.mark.unit
@@ -17,6 +19,28 @@ from unittest.mock import Mock, MagicMock, patch
 from pathlib import Path
 import tempfile
 import os
+
+
+@pytest.fixture(autouse=True)
+def _stub_sentence_transformers(monkeypatch):
+    """
+    Provide a lightweight sentence_transformers stub so reranker unit tests
+    can run without the heavy optional dependency installed.
+    """
+    if "sentence_transformers" in sys.modules:
+        return
+
+    stub_module = types.ModuleType("sentence_transformers")
+
+    class _DummyCrossEncoder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def predict(self, pairs, show_progress_bar=False):
+            return np.zeros(len(pairs), dtype=float)
+
+    stub_module.CrossEncoder = _DummyCrossEncoder
+    monkeypatch.setitem(sys.modules, "sentence_transformers", stub_module)
 
 
 # ====================== RAGConfig Tests ======================
@@ -606,6 +630,16 @@ class TestRerankerAPI:
         assert "How good is tree protocol as a deadlock prevention protocol?" in parts
         assert len(parts) == 2
 
+    def test_merge_weak_fragments_trailing_fragment_no_index_error(self):
+        """Trailing weak fragment should not raise IndexError during merge."""
+        from src.ranking.reranker import _merge_weak_fragments
+
+        parts = ["how does strict 2pl ensure recoverability", "and"]
+        out = _merge_weak_fragments(parts)
+
+        assert isinstance(out, list)
+        assert len(out) >= 1
+
     @patch("src.ranking.reranker._rank_indices_with_cross_encoder")
     @patch("src.ranking.reranker._is_multi_hop_query", return_value=False)
     def test_adaptive_multi_hop_simple_route(self, _mock_is_multi_hop, mock_rank):
@@ -639,6 +673,78 @@ class TestRerankerAPI:
         assert out == [2, 0]
         mock_details.assert_called_once()
         mock_constrained.assert_called_once()
+
+    def test_constrained_post_select_enforces_page_cap_and_refills(self):
+        """Constraint post-select should enforce page cap and refill from ranked order."""
+        from src.ranking.reranker import _constrained_post_select
+
+        ranked = [0, 1, 2, 3, 4]
+        sub_scores = [
+            [0.95, 0.91, 0.20, 0.75, 0.72],  # subquery 0
+            [0.10, 0.20, 0.93, 0.89, 0.70],  # subquery 1
+        ]
+      
+        chunk_pages = [[1], [1], [1], [2], [3]]
+
+        out = _constrained_post_select(
+            ranked_indices=ranked,
+            sub_scores=sub_scores,
+            top_n=4,
+            chunk_pages=chunk_pages,
+        )
+
+        assert out == [0, 2, 3, 4]
+
+    def test_constrained_post_select_falls_back_when_constraints_infeasible(self):
+        """When constraints cannot be satisfied, function should fall back to ranked prefix."""
+        from src.ranking.reranker import _constrained_post_select
+
+        ranked = [0, 1, 2]
+        sub_scores = [
+            [0.90, 0.40, 0.40],
+            [0.40, 0.90, 0.40],
+        ]
+
+        out = _constrained_post_select(
+            ranked_indices=ranked,
+            sub_scores=sub_scores,
+            top_n=2,
+            chunk_pages=[[1], [1], [2]],
+        )
+
+        assert out == [0, 1]
+
+    @patch("src.ranking.reranker._constrained_post_select")
+    @patch("src.ranking.reranker._rank_indices_with_subquery_coverage_details")
+    @patch("src.ranking.reranker._is_multi_hop_query", return_value=True)
+    def test_rerank_indices_forwards_chunk_pages_to_constraints(
+        self,
+        _mock_is_multi_hop,
+        mock_details,
+        mock_constrained,
+    ):
+        """rerank_indices should pass chunk_pages into constrained post-selection."""
+        from src.ranking.reranker import rerank_indices
+
+        mock_details.return_value = (
+            [1, 0],
+            [0.8, 0.7],
+            [[0.9, 0.4], [0.3, 0.85]],
+        )
+        mock_constrained.return_value = [1, 0]
+        chunk_pages = [[10], [11]]
+
+        out = rerank_indices(
+            "Compare strict 2PL and timestamp ordering on deadlocks and recoverability.",
+            ["chunk-a", "chunk-b"],
+            mode="adaptive_multi_hop",
+            top_n=2,
+            chunk_pages=chunk_pages,
+        )
+
+        assert out == [1, 0]
+        _, kwargs = mock_constrained.call_args
+        assert kwargs["chunk_pages"] == chunk_pages
 
 
 # ====================== Query Enhancement Tests ======================
